@@ -28,6 +28,8 @@ video_path: "${output_dir}/0_input_video.mp4"
 # Options
 static_cam: False
 verbose: False
+pose_json: null
+slam_results: null  # Add this line to include slam_results in the configuration
 
 paths:
   bbx: ${preprocess_dir}/bbx.pt
@@ -40,3 +42,6 @@ paths:
   global_video: ${output_dir}/2_global.mp4
   incam_global_horiz_video: ${output_dir}/${video_name}_3_incam_global_horiz.mp4
   slam: ${preprocess_dir}/slam_results.pt
+  composite_video: ${output_dir}/${video_name}_composite.mp4
+  keypoints_3d_json: ${output_dir}/${video_name}_keypoints_3d.json
+  camera_poses_json: ${output_dir}/${video_name}_camera_poses.json

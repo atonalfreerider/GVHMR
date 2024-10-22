@@ -142,3 +142,71 @@ def draw_coco17_skeleton_batch(imgs, keypoints_batch, conf_thr=0):
     for i in range(len(imgs)):
         imgs_out.append(draw_coco17_skeleton(imgs[i], keypoints_batch[i], conf_thr))
     return imgs_out
+
+
+def draw_smpl_skeleton_3d(img, keypoints_3d, K, R, T, conf_thr=0):
+    """
+    Draw a 3D SMPL skeleton on the image using a 24-keypoint format.
+
+    Args:
+    img: numpy array of shape (H, W, 3)
+    keypoints_3d: numpy array of shape (24, 3) containing 3D keypoint coordinates
+    K: Camera intrinsic matrix (3, 3)
+    R: Camera rotation matrix (3, 3) or (3, 4)
+    T: Camera translation vector (3,) or (3, 1)
+    conf_thr: Confidence threshold for keypoints (if available)
+
+    Returns:
+    img: numpy array with skeleton drawn on it
+    """
+    img = img.copy()
+    # Project 3D keypoints to 2D
+    keypoints_3d_homogeneous = np.hstack((keypoints_3d, np.ones((24, 1))))
+
+    # Handle different shapes of R and T
+    if R.shape[1] == 4:
+        # R is [R|t], so we don't need to use T
+        keypoints_cam = R @ keypoints_3d_homogeneous.T
+    else:
+        # R is 3x3, so we need to use T
+        keypoints_cam = (R @ keypoints_3d[:, :3].T).T + T.reshape(1, 3)
+        keypoints_cam = keypoints_cam.T
+
+    keypoints_2d = (K @ keypoints_cam)
+    keypoints_2d = keypoints_2d[:2, :] / keypoints_2d[2, :]
+    keypoints_2d = keypoints_2d.T
+
+    # Define SMPL skeleton connections
+    skeleton = [
+        (0, 1), (0, 2), (0, 3),  # Pelvis to right hip, left hip, and spine
+        (3, 6), (6, 9), (9, 12), (12, 15),  # Spine to neck
+        (9, 13), (9, 14),  # Shoulders
+        (13, 16), (16, 18), (18, 20), (20, 22),  # Right arm
+        (14, 17), (17, 19), (19, 21), (21, 23),  # Left arm
+        (1, 4), (4, 7), (7, 10),  # Right leg
+        (2, 5), (5, 8), (8, 11),  # Left leg
+    ]
+
+    for start, end in skeleton:
+        start_point = tuple(keypoints_2d[start].astype(int))
+        end_point = tuple(keypoints_2d[end].astype(int))
+
+        # Check if the keypoints are within the image bounds
+        if (0 <= start_point[0] < img.shape[1] and 0 <= start_point[1] < img.shape[0] and
+                0 <= end_point[0] < img.shape[1] and 0 <= end_point[1] < img.shape[0]):
+            cv2.line(img, start_point, end_point, (0, 255, 0), 2)
+
+    # Draw keypoints
+    for kp in keypoints_2d.astype(int):
+        if 0 <= kp[0] < img.shape[1] and 0 <= kp[1] < img.shape[0]:
+            cv2.circle(img, tuple(kp), 4, (0, 255, 0), -1)
+
+    return img
+
+
+def draw_smpl_skeleton_3d_batch(imgs, keypoints_3d_batch, K_batch, R_batch, T_batch, conf_thr=0):
+    assert len(imgs) == len(keypoints_3d_batch) == len(K_batch) == len(R_batch) == len(T_batch)
+    imgs_out = []
+    for i in range(len(imgs)):
+        imgs_out.append(draw_smpl_skeleton_3d(imgs[i], keypoints_3d_batch[i], K_batch[i], R_batch[i], T_batch[i], conf_thr))
+    return imgs_out

@@ -354,3 +354,39 @@ def get_ground_params_from_points(root_points, vert_points):
     vert_min = vert_points.reshape(-1, 3).min(0)[0]  # (L, 3)
     scale = (vert_max - vert_min)[[0, 2]].max()
     return float(scale), float(cx), float(cz)
+
+
+def draw_skeleton_on_image(image, keypoints):
+    """
+    Draw a skeleton on the image using COCO17 format.
+    
+    Args:
+    image: numpy array of shape (H, W, 3)
+    keypoints: numpy array of shape (17, 2) containing 2D keypoint coordinates
+    
+    Returns:
+    image: numpy array with skeleton drawn on it
+    """
+    # COCO17 keypoint pairs for skeleton
+    skeleton = [
+        (16, 14), (14, 12), (17, 15), (15, 13), (12, 13), (6, 12), (7, 13),
+        (6, 7), (6, 8), (7, 9), (8, 10), (9, 11), (2, 3), (1, 2), (1, 3),
+        (2, 4), (3, 5), (4, 6), (5, 7)
+    ]
+
+    # Colors for each limb
+    colors = [
+        (255, 0, 0), (255, 85, 0), (255, 170, 0), (255, 255, 0), (170, 255, 0),
+        (85, 255, 0), (0, 255, 0), (0, 255, 85), (0, 255, 170), (0, 255, 255),
+        (0, 170, 255), (0, 85, 255), (0, 0, 255), (85, 0, 255), (170, 0, 255),
+        (255, 0, 255), (255, 0, 170), (255, 0, 85)
+    ]
+
+    for (start_point, end_point), color in zip(skeleton, colors):
+        start = tuple(keypoints[start_point - 1].astype(int))
+        end = tuple(keypoints[end_point - 1].astype(int))
+        cv2.line(image, start, end, color, thickness=2)
+
+    return image
+
+

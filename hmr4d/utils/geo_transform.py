@@ -268,18 +268,7 @@ def ransac_PnP_batch(K_raw, pts_2d, pts_3d, err_thr=10):
     return fit_R, fit_t
 
 
-def triangulate_point(Ts_w2c, c_p2d, **kwargs):
-    from hmr4d.utils.geo.triangulation import triangulate_persp
 
-    print("Deprecated, please import from hmr4d.utils.geo.triangulation")
-    return triangulate_persp(Ts_w2c, c_p2d, **kwargs)
-
-
-def triangulate_point_ortho(Ts_w2c, c_p2d, **kwargs):
-    from hmr4d.utils.geo.triangulation import triangulate_ortho
-
-    print("Deprecated, please import from hmr4d.utils.geo.triangulation")
-    return triangulate_ortho(Ts_w2c, c_p2d, **kwargs)
 
 
 def get_nearby_points(points, query_verts, padding=0.0, p=1):

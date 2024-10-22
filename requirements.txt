@@ -39,8 +39,3 @@ chumpy
 smplx
 # open3d==0.17.0
 wis3d
-
-# 2D-Pose
-ultralytics==8.2.42  # YOLO
-cython_bbox
-lapx
