@@ -12,7 +12,6 @@ from hmr4d.dataset.imgfeat_motion.base_dataset import ImgfeatMotionDatasetBase
 from hmr4d.utils.net_utils import get_valid_mask, repeat_to_max_len, repeat_to_max_len_dict
 from hmr4d.utils.smplx_utils import make_smplx
 from hmr4d.utils.video_io_utils import get_video_lwh, read_video_np, save_video
-from hmr4d.utils.vis.renderer_utils import simple_render_mesh_background
 
 from hmr4d.configs import MainStore, builds
 

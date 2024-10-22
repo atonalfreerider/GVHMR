@@ -1,8 +1,6 @@
-import cv2
 import torch
-import pytorch_lightning as pl
-import numpy as np
 import argparse
+import json
 from hmr4d.utils.pylogger import Log
 import hydra
 from hydra import initialize_config_module, compose
@@ -11,57 +9,52 @@ from pytorch3d.transforms import quaternion_to_matrix
 
 from hmr4d.configs import register_store_gvhmr
 from hmr4d.utils.video_io_utils import (
-    get_video_lwh,
-    read_video_np,
-    save_video,
-    merge_videos_horizontal,
+    get_video_lwhfps,
     get_writer,
     get_video_reader,
 )
-from hmr4d.utils.vis.cv2_utils import draw_bbx_xyxy_on_image_batch, draw_coco17_skeleton_batch
 
-from hmr4d.utils.preproc import Tracker, Extractor, VitPoseExtractor, SLAMModel
-
-from hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy, estimate_K, convert_K_to_K4, create_camera_sensor
+from hmr4d.utils.preproc import Extractor
+from hmr4d.utils.geo.hmr_cam import get_bbx_xyxy_from_keypoints, estimate_K
 from hmr4d.utils.geo_transform import compute_cam_angvel
 from hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL
 from hmr4d.utils.net_utils import detach_to_cpu, to_cuda
 from hmr4d.utils.smplx_utils import make_smplx
-from hmr4d.utils.vis.renderer import Renderer, get_global_cameras_static, get_ground_params_from_points
 from tqdm import tqdm
-from hmr4d.utils.geo_transform import apply_T_on_points, compute_T_ayfz2ay
-from einops import einsum, rearrange
-
+from einops import einsum
+import numpy as np
+import os
 
 CRF = 23  # 17 is lossless, every +6 halves the mp4 size
-
+BATCH_LENGTH_SECONDS = 120  # Default batch length in seconds
 
 def parse_args_to_cfg():
     # Put all args to cfg
     parser = argparse.ArgumentParser()
     parser.add_argument("--video", type=str, default="inputs/demo/dance_3.mp4")
-    parser.add_argument("--output_root", type=str, default=None, help="by default to outputs/demo")
-    parser.add_argument("-s", "--static_cam", action="store_true", help="If true, skip DPVO")
-    parser.add_argument("--verbose", action="store_true", help="If true, draw intermediate results")
+    parser.add_argument("--output_root", type=str, default="./outputs/demo", help="by default to outputs/demo")
+    parser.add_argument("--pose_json", type=str, default=None, help="Path to the pose 2D JSON file, eg from YOLO pose output")
+    parser.add_argument("--visual_odometry_json", type=str, default=None, help="Path to the visual odometry results json")
+    parser.add_argument("--batch_length", type=int, default=BATCH_LENGTH_SECONDS, help="Batch length in seconds")
     args = parser.parse_args()
 
     # Input
     video_path = Path(args.video)
     assert video_path.exists(), f"Video not found at {video_path}"
-    length, width, height = get_video_lwh(video_path)
-    Log.info(f"[Input]: {video_path}")
-    Log.info(f"(L, W, H) = ({length}, {width}, {height})")
+
     # Cfg
     with initialize_config_module(version_base="1.3", config_module=f"hmr4d.configs"):
         overrides = [
             f"video_name={video_path.stem}",
-            f"static_cam={args.static_cam}",
-            f"verbose={args.verbose}",
+            f"batch_length={args.batch_length}"
         ]
 
-        # Allow to change output root
         if args.output_root is not None:
             overrides.append(f"output_root={args.output_root}")
+        if args.pose_json is not None:
+            overrides.append(f"+pose_json={args.pose_json}")
+        if args.visual_odometry_json is not None:
+            overrides.append(f"+visual_odometry_json={args.visual_odometry_json}")
         register_store_gvhmr()
         cfg = compose(config_name="demo", overrides=overrides)
 
@@ -70,214 +63,190 @@ def parse_args_to_cfg():
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
     Path(cfg.preprocess_dir).mkdir(parents=True, exist_ok=True)
 
-    # Copy raw-input-video to video_path
-    Log.info(f"[Copy Video] {video_path} -> {cfg.video_path}")
-    if not Path(cfg.video_path).exists() or get_video_lwh(video_path)[0] != get_video_lwh(cfg.video_path)[0]:
-        reader = get_video_reader(video_path)
-        writer = get_writer(cfg.video_path, fps=30, crf=CRF)
-        for img in tqdm(reader, total=get_video_lwh(video_path)[0], desc=f"Copy"):
-            writer.write_frame(img)
-        writer.close()
-        reader.close()
+    # Add new paths
+    cfg.video_path = video_path
+    cfg.paths.keypoints_3d_json = os.path.join(cfg.output_dir, f"{Path(cfg.pose_json).stem}_keypoints_3d.json")
 
     return cfg
 
+def load_and_format_pose_data(json_path, image_size):
+    with open(json_path, 'r') as f:
+        pose_data = json.load(f)
+
+    num_frames = len(pose_data)
+    keypoints_list = []
+    bbx_xys_list = []
+    bbx_xyxy_list = []
+
+    for frame_idx in range(num_frames):
+        frame = pose_data.get(str(frame_idx), {})
+
+        if frame and 'keypoints' in frame:
+            keypoints = torch.tensor(frame['keypoints'], dtype=torch.float32).reshape(1, -1, 3)
+        else:
+            keypoints = torch.zeros((1, 17, 3), dtype=torch.float32)
+
+        bbx_xyxy = get_bbx_xyxy_from_keypoints(keypoints, image_size)
+        x_min, y_min, x_max, y_max = bbx_xyxy[0]
+        center_x = (x_min + x_max) / 2
+        center_y = (y_min + y_max) / 2
+        size = max(x_max - x_min, y_max - y_min)
+
+        bbx_xys = torch.tensor([center_x, center_y, size], dtype=torch.float32)
+
+        keypoints_list.append(keypoints[0])  # Remove the batch dimension
+        bbx_xys_list.append(bbx_xys)
+        bbx_xyxy_list.append(bbx_xyxy[0])  # Remove the batch dimension
+
+    keypoints = torch.stack(keypoints_list)
+    bbx_xys = torch.stack(bbx_xys_list)
+    bbx_xyxy = torch.stack(bbx_xyxy_list)
+
+    formatted_data = {
+        "bbx_xyxy": bbx_xyxy,
+        "bbx_xys": bbx_xys,
+        "yolopose": keypoints
+    }
+
+    return formatted_data
 
 @torch.no_grad()
-def run_preprocess(cfg):
-    Log.info(f"[Preprocess] Start!")
-    tic = Log.time()
-    video_path = cfg.video_path
+def run_preprocess(cfg, batch_video_path, formatted_data, start_frame, end_frame):
     paths = cfg.paths
-    static_cam = cfg.static_cam
-    verbose = cfg.verbose
 
-    # Get bbx tracking result
-    if not Path(paths.bbx).exists():
-        tracker = Tracker()
-        bbx_xyxy = tracker.get_one_track(video_path).float()  # (L, 4)
-        bbx_xys = get_bbx_xys_from_xyxy(bbx_xyxy, base_enlarge=1.2).float()  # (L, 3) apply aspect ratio and enlarge
-        torch.save({"bbx_xyxy": bbx_xyxy, "bbx_xys": bbx_xys}, paths.bbx)
-        del tracker
-    else:
-        bbx_xys = torch.load(paths.bbx)["bbx_xys"]
-        Log.info(f"[Preprocess] bbx (xyxy, xys) from {paths.bbx}")
-    if verbose:
-        video = read_video_np(video_path)
-        bbx_xyxy = torch.load(paths.bbx)["bbx_xyxy"]
-        video_overlay = draw_bbx_xyxy_on_image_batch(bbx_xyxy, video)
-        save_video(video_overlay, cfg.paths.bbx_xyxy_video_overlay)
+    # Extract the relevant segment of pose data for the batch
+    bbx_xyxy_full = formatted_data["bbx_xyxy"]
+    bbx_xys_full = formatted_data["bbx_xys"]
+    yolopose_full = formatted_data["yolopose"]
 
-    # Get VitPose
-    if not Path(paths.vitpose).exists():
-        vitpose_extractor = VitPoseExtractor()
-        vitpose = vitpose_extractor.extract(video_path, bbx_xys)
-        torch.save(vitpose, paths.vitpose)
-        del vitpose_extractor
-    else:
-        vitpose = torch.load(paths.vitpose)
-        Log.info(f"[Preprocess] vitpose from {paths.vitpose}")
-    if verbose:
-        video = read_video_np(video_path)
-        video_overlay = draw_coco17_skeleton_batch(video, vitpose, 0.5)
-        save_video(video_overlay, paths.vitpose_video_overlay)
+    bbx_xyxy = bbx_xyxy_full[start_frame:end_frame]
+    bbx_xys = bbx_xys_full[start_frame:end_frame]
+    keypoints = yolopose_full[start_frame:end_frame]
+
+    torch.save({"bbx_xyxy": bbx_xyxy, "bbx_xys": bbx_xys}, paths.bbx)
+    torch.save(keypoints, paths.vitpose)
+    Log.info(f"[Preprocess] Saved vitpose data to {paths.vitpose}")
 
     # Get vit features
-    if not Path(paths.vit_features).exists():
-        extractor = Extractor()
-        vit_features = extractor.extract_video_features(video_path, bbx_xys)
-        torch.save(vit_features, paths.vit_features)
-        del extractor
-    else:
-        Log.info(f"[Preprocess] vit_features from {paths.vit_features}")
+    extractor = Extractor()
+    vit_features = extractor.extract_video_features(batch_video_path, bbx_xys)
+    torch.save(vit_features, paths.vit_features)
+    del extractor
 
-    # Get DPVO results
-    if not static_cam:  # use slam to get cam rotation
-        if not Path(paths.slam).exists():
-            length, width, height = get_video_lwh(cfg.video_path)
-            K_fullimg = estimate_K(width, height)
-            intrinsics = convert_K_to_K4(K_fullimg)
-            slam = SLAMModel(video_path, width, height, intrinsics, buffer=4000, resize=0.5)
-            bar = tqdm(total=length, desc="DPVO")
-            while True:
-                ret = slam.track()
-                if ret:
-                    bar.update()
-                else:
-                    break
-            slam_results = slam.process()  # (L, 7), numpy
-            torch.save(slam_results, paths.slam)
-        else:
-            Log.info(f"[Preprocess] slam results from {paths.slam}")
-
-    Log.info(f"[Preprocess] End. Time elapsed: {Log.time()-tic:.2f}s")
-
-
-def load_data_dict(cfg):
+def load_data_dict(cfg, length, width, height, traj):
     paths = cfg.paths
-    length, width, height = get_video_lwh(cfg.video_path)
-    if cfg.static_cam:
-        R_w2c = torch.eye(3).repeat(length, 1, 1)
-    else:
-        traj = torch.load(cfg.paths.slam)
-        traj_quat = torch.from_numpy(traj[:, [6, 3, 4, 5]])
-        R_w2c = quaternion_to_matrix(traj_quat).mT
+
+    R_w2c = quaternion_to_matrix(traj).mT
     K_fullimg = estimate_K(width, height).repeat(length, 1, 1)
-    # K_fullimg = create_camera_sensor(width, height, 26)[2].repeat(length, 1, 1)
+
+    bbx_xys = torch.load(paths.bbx)["bbx_xys"]
+    kp2d = torch.load(paths.vitpose)
+    f_imgseq = torch.load(paths.vit_features)
+
+    cam_angvel = compute_cam_angvel(R_w2c)
 
     data = {
         "length": torch.tensor(length),
-        "bbx_xys": torch.load(paths.bbx)["bbx_xys"],
-        "kp2d": torch.load(paths.vitpose),
+        "bbx_xys": bbx_xys,
+        "kp2d": kp2d,
         "K_fullimg": K_fullimg,
-        "cam_angvel": compute_cam_angvel(R_w2c),
-        "f_imgseq": torch.load(paths.vit_features),
+        "cam_angvel": cam_angvel,
+        "f_imgseq": f_imgseq,
     }
     return data
 
+def process_batch(cfg, model, start_frame:int, end_frame:int, batch_index:int, fps:int, formatted_data, vo_results, image_size):
+    # Copy relevant frames to a temporary video file
+    video_filename = f"file_batch_{batch_index}.mp4"
+    temp_video_path = os.path.join(cfg.output_dir, video_filename)
+    reader = get_video_reader(cfg.video_path)
+    writer = get_writer(temp_video_path, fps=fps, crf=CRF)
 
-def render_incam(cfg):
-    incam_video_path = Path(cfg.paths.incam_video)
-    if incam_video_path.exists():
-        Log.info(f"[Render Incam] Video already exists at {incam_video_path}")
-        return
+    for frame_idx, img in enumerate(tqdm(reader, total=end_frame - start_frame, desc=f"Copy Batch {batch_index}")):
+        if start_frame <= frame_idx < end_frame:
+            writer.write_frame(img)
 
-    pred = torch.load(cfg.paths.hmr4d_results)
-    smplx = make_smplx("supermotion").cuda()
-    smplx2smpl = torch.load("hmr4d/utils/body_model/smplx2smpl_sparse.pt").cuda()
-    faces_smpl = make_smplx("smpl").faces
-
-    # smpl
-    smplx_out = smplx(**to_cuda(pred["smpl_params_incam"]))
-    pred_c_verts = torch.stack([torch.matmul(smplx2smpl, v_) for v_ in smplx_out.vertices])
-
-    # -- rendering code -- #
-    video_path = cfg.video_path
-    length, width, height = get_video_lwh(video_path)
-    K = pred["K_fullimg"][0]
-
-    # renderer
-    renderer = Renderer(width, height, device="cuda", faces=faces_smpl, K=K)
-    reader = get_video_reader(video_path)  # (F, H, W, 3), uint8, numpy
-    bbx_xys_render = torch.load(cfg.paths.bbx)["bbx_xys"]
-
-    # -- render mesh -- #
-    verts_incam = pred_c_verts
-    writer = get_writer(incam_video_path, fps=30, crf=CRF)
-    for i, img_raw in tqdm(enumerate(reader), total=get_video_lwh(video_path)[0], desc=f"Rendering Incam"):
-        img = renderer.render_mesh(verts_incam[i].cuda(), img_raw, [0.8, 0.8, 0.8])
-
-        # # bbx
-        # bbx_xys_ = bbx_xys_render[i].cpu().numpy()
-        # lu_point = (bbx_xys_[:2] - bbx_xys_[2:] / 2).astype(int)
-        # rd_point = (bbx_xys_[:2] + bbx_xys_[2:] / 2).astype(int)
-        # img = cv2.rectangle(img, lu_point, rd_point, (255, 178, 102), 2)
-
-        writer.write_frame(img)
     writer.close()
     reader.close()
 
+    # Run preprocessing for the batch
+    run_preprocess(cfg, temp_video_path, formatted_data, start_frame, end_frame)
 
-def render_global(cfg):
-    global_video_path = Path(cfg.paths.global_video)
-    if global_video_path.exists():
-        Log.info(f"[Render Global] Video already exists at {global_video_path}")
-        return
+    quaternion_array = vo_results[start_frame:end_frame]
 
-    debug_cam = False
-    pred = torch.load(cfg.paths.hmr4d_results)
-    smplx = make_smplx("supermotion").cuda()
-    smplx2smpl = torch.load("hmr4d/utils/body_model/smplx2smpl_sparse.pt").cuda()
-    faces_smpl = make_smplx("smpl").faces
-    J_regressor = torch.load("hmr4d/utils/body_model/smpl_neutral_J_regressor.pt").cuda()
+    # Load data and run HMR4D
+    data = load_data_dict(cfg, end_frame - start_frame, image_size[0], image_size[1], quaternion_array)
+    pred = model.predict(data, static_cam=len(quaternion_array) > 0)
+    pred = detach_to_cpu(pred)
 
-    # smpl
-    smplx_out = smplx(**to_cuda(pred["smpl_params_global"]))
-    pred_ay_verts = torch.stack([torch.matmul(smplx2smpl, v_) for v_ in smplx_out.vertices])
+    # Save HMR results for the batch
+    batch_hmr_results_path = cfg.paths.hmr4d_results.replace(".pt", f"_batch_{batch_index}.pt")
+    torch.save(pred, batch_hmr_results_path)
 
-    def move_to_start_point_face_z(verts):
-        "XZ to origin, Start from the ground, Face-Z"
-        # position
-        verts = verts.clone()  # (L, V, 3)
-        offset = einsum(J_regressor, verts[0], "j v, v i -> j i")[0]  # (3)
-        offset[1] = verts[:, :, [1]].min()
-        verts = verts - offset
-        # face direction
-        T_ay2ayfz = compute_T_ayfz2ay(einsum(J_regressor, verts[[0]], "j v, l v i -> l j i"), inverse=True)
-        verts = apply_T_on_points(verts, T_ay2ayfz)
-        return verts
+    # Clean up temporary video file
+    os.remove(temp_video_path)
 
-    verts_glob = move_to_start_point_face_z(pred_ay_verts)
-    joints_glob = einsum(J_regressor, verts_glob, "j v, l v i -> l j i")  # (L, J, 3)
-    global_R, global_T, global_lights = get_global_cameras_static(
-        verts_glob.cpu(),
-        beta=2.0,
-        cam_height_degree=20,
-        target_center_height=1.0,
-    )
+def stitch_batches_in_memory(cfg, num_batches:int):
+    """
+    Stitch the batches together and hold the results in memory.
+    """
+    all_transformed_keypoints_3d = []
 
-    # -- rendering code -- #
-    video_path = cfg.video_path
-    length, width, height = get_video_lwh(video_path)
-    _, _, K = create_camera_sensor(width, height, 24)  # render as 24mm lens
+    # Convert batch to global joints
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    smplx = make_smplx("supermotion").to(device)
+    smplx2smpl = torch.load("hmr4d/utils/body_model/smplx2smpl_sparse.pt").to(device)
+    J_regressor = torch.load("hmr4d/utils/body_model/smpl_neutral_J_regressor.pt").to(device)
 
-    # renderer
-    renderer = Renderer(width, height, device="cuda", faces=faces_smpl, K=K)
-    # renderer = Renderer(width, height, device="cuda", faces=faces_smpl, K=K, bin_size=0)
+    for batch_index in range(num_batches):
+        # Load current batch results
+        batch_hmr_results_path = cfg.paths.hmr4d_results.replace(".pt", f"_batch_{batch_index}.pt")
+        batch = torch.load(batch_hmr_results_path)
 
-    # -- render mesh -- #
-    scale, cx, cz = get_ground_params_from_points(joints_glob[:, 0], verts_glob)
-    renderer.set_ground(scale * 1.5, cx, cz)
-    color = torch.ones(3).float().cuda() * 0.8
+        smplx_out = smplx(**to_cuda(batch["smpl_params_global"]))
+        pred_ay_verts = torch.stack([torch.matmul(smplx2smpl, v_) for v_ in smplx_out.vertices])
+        joints_glob = einsum(J_regressor, pred_ay_verts, "j v, l v i -> l j i")  # (L, J, 3)
 
-    render_length = length if not debug_cam else 8
-    writer = get_writer(global_video_path, fps=30, crf=CRF)
-    for i in tqdm(range(render_length), desc=f"Rendering Global"):
-        cameras = renderer.create_camera(global_R[i], global_T[i])
-        img = renderer.render_with_ground(verts_glob[[i]], color[None], cameras, global_lights)
-        writer.write_frame(img)
-    writer.close()
+        # Append transformed joints to the list
+        for i in range(len(joints_glob)):
+            frame_keypoints = joints_glob[i].cpu().numpy()
+            frame_keypoints[:, 0] *= -1  # Negate x values
+            all_transformed_keypoints_3d.append([
+                {"x": float(kp[0]), "y": float(kp[1]), "z": float(kp[2])} for kp in frame_keypoints
+            ])
 
+    return all_transformed_keypoints_3d
+
+def json_to_rotations(data):
+    """
+    Extract quaternion rotations [qx, qy, qz, qw] from the provided sequential data (without keys).
+    The data format is expected to be a list of lists where each sublist contains [x, y, z, q_x, q_y, q_z, q_w].
+    """
+
+    # Get the number of poses (based on the number of entries in the data list)
+    n_poses = len(data)
+
+    # Initialize an array for the quaternion rotations
+    rotations = np.zeros((n_poses, 4))  # Array for quaternion rotations [q_x, q_y, q_z, q_w]
+
+    # Iterate through the data and extract quaternion components
+    for i, pose_data in enumerate(data):
+        rotations[i, 0] = pose_data[3]  # q_x
+        rotations[i, 1] = pose_data[4]  # q_y
+        rotations[i, 2] = pose_data[5]  # q_z
+        rotations[i, 3] = pose_data[6]  # q_w
+
+    # Convert the NumPy array to a PyTorch tensor
+    rotations_tensor = torch.tensor(rotations, dtype=torch.float32)
+
+    return rotations_tensor
+
+def load_json(json_path):
+    try:
+        with open(json_path, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
 if __name__ == "__main__":
     cfg = parse_args_to_cfg()
@@ -285,26 +254,33 @@ if __name__ == "__main__":
     Log.info(f"[GPU]: {torch.cuda.get_device_name()}")
     Log.info(f'[GPU]: {torch.cuda.get_device_properties("cuda")}')
 
-    # ===== Preprocess and save to disk ===== #
-    run_preprocess(cfg)
-    data = load_data_dict(cfg)
+    # Determine video length, fps, and number of batches
+    length, width, height, fps = get_video_lwhfps(cfg.video_path)
+    image_size = (height, width)
+    batch_length_frames = cfg.batch_length * fps
+    num_batches = int((length + batch_length_frames - 1) // batch_length_frames)  # Use integer division
 
-    # ===== HMR4D ===== #
-    if not Path(paths.hmr4d_results).exists():
-        Log.info("[HMR4D] Predicting")
-        model: DemoPL = hydra.utils.instantiate(cfg.model, _recursive_=False)
-        model.load_pretrained_model(cfg.ckpt_path)
-        model = model.eval().cuda()
-        tic = Log.sync_time()
-        pred = model.predict(data, static_cam=cfg.static_cam)
-        pred = detach_to_cpu(pred)
-        data_time = data["length"] / 30
-        Log.info(f"[HMR4D] Elapsed: {Log.sync_time() - tic:.2f}s for data-length={data_time:.1f}s")
-        torch.save(pred, paths.hmr4d_results)
+    formatted_data = load_and_format_pose_data(cfg.pose_json, image_size)
+    vo_results = None
+    if cfg.visual_odometry_json:
+        vo_results = json_to_rotations(load_json(cfg.visual_odometry_json))
 
-    # ===== Render ===== #
-    render_incam(cfg)
-    render_global(cfg)
-    if not Path(paths.incam_global_horiz_video).exists():
-        Log.info("[Merge Videos]")
-        merge_videos_horizontal([paths.incam_video, paths.global_video], paths.incam_global_horiz_video)
+    model: DemoPL = hydra.utils.instantiate(cfg.model, _recursive_=False)
+    model.load_pretrained_model(cfg.ckpt_path)
+    model = model.eval().cuda()
+
+    # Process each batch
+    for batch_index in range(num_batches):
+        Log.info(f"Processing Batch {batch_index}")
+        start_frame = int(batch_index * batch_length_frames)
+        end_frame = int(min((batch_index + 1) * batch_length_frames, length))
+        process_batch(cfg, model, start_frame, end_frame, batch_index, int(fps), formatted_data, vo_results, image_size)
+
+    # Stitch all batches together in memory
+    all_transformed_keypoints_3d = stitch_batches_in_memory(cfg, num_batches)
+
+    # Serialize to JSON
+    with open(cfg.paths.keypoints_3d_json, 'w') as f:
+        json.dump(all_transformed_keypoints_3d, f, indent=2)
+
+    Log.info(f"3D keypoints saved to: {paths.keypoints_3d_json}")

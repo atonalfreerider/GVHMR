@@ -282,16 +282,73 @@ def safely_render_x3d_K(x3d, K_fullimg, thr):
     return i_x2d
 
 
-def get_bbx_xys_from_xyxy(bbx_xyxy, base_enlarge=1.2):
+def get_bbx_xyxy_from_keypoints(keypoints, image_size, base_enlarge=1.2, min_size=0.1):
+    """
+    Args:
+        keypoints: (N, J, 3) [x, y, confidence]
+        image_size: (height, width) of the original image
+        base_enlarge: factor to enlarge the bounding box (default: 1.2 for 20% padding)
+        min_size: minimum size of bounding box as a fraction of image size
+    Returns:
+        bbx_xyxy: (N, 4) [x_min, y_min, x_max, y_max]
+    """
+    N, J, _ = keypoints.shape
+    # Consider keypoints valid if they are not at (0,0) and have positive confidence
+    valid_keypoints = keypoints[..., :2][(keypoints[..., :2] != 0).all(dim=-1) & (keypoints[..., 2] > 0)]
+
+    if len(valid_keypoints) == 0:
+        # If no valid keypoints, return a default bounding box
+        default_size = min(image_size) * min_size
+        center_x, center_y = image_size[1] / 2, image_size[0] / 2
+        return torch.tensor([[
+            center_x - default_size / 2, center_y - default_size / 2,
+            center_x + default_size / 2, center_y + default_size / 2
+        ]] * N, dtype=torch.float32)
+
+    x_min, y_min = valid_keypoints.min(dim=0)[0]
+    x_max, y_max = valid_keypoints.max(dim=0)[0]
+
+    # Enlarge the bounding box
+    width = x_max - x_min
+    height = y_max - y_min
+    center_x = (x_min + x_max) / 2
+    center_y = (y_min + y_max) / 2
+
+    # Maintain aspect ratio
+    size = max(width, height) * base_enlarge
+    size = max(size, min(image_size) * min_size)  # Ensure minimum size
+
+    half_width = size * width / max(width, height) / 2
+    half_height = size * height / max(width, height) / 2
+
+    # Calculate new xyxy
+    x_min = torch.clamp(center_x - half_width, min=0.0)
+    y_min = torch.clamp(center_y - half_height, min=0.0)
+    x_max = torch.clamp(center_x + half_width, max=float(image_size[1]))
+    y_max = torch.clamp(center_y + half_height, max=float(image_size[0]))
+
+    bbx_xyxy = torch.stack([x_min, y_min, x_max, y_max], dim=-1)
+    return bbx_xyxy.repeat(N, 1)  # Repeat for each frame if N > 1
+
+def get_bbx_xys_from_xyxy(bbx_xyxy, image_size):
     """
     Args:
         bbx_xyxy: (N, 4) [x1, y1, x2, y2]
+        image_size: (height, width) of the original image
     Returns:
         bbx_xys: (N, 3) [center_x, center_y, size]
     """
+    # Calculate center and size
+    center_x = (bbx_xyxy[..., 0] + bbx_xyxy[..., 2]) / 2
+    center_y = (bbx_xyxy[..., 1] + bbx_xyxy[..., 3]) / 2
+    size = torch.max(bbx_xyxy[..., 2] - bbx_xyxy[..., 0], bbx_xyxy[..., 3] - bbx_xyxy[..., 1])
 
-    i_p2d = torch.stack([bbx_xyxy[:, [0, 1]], bbx_xyxy[:, [2, 3]]], dim=1)  # (L, 2, 2)
-    bbx_xys = get_bbx_xys(i_p2d[None], base_enlarge=base_enlarge)[0]
+    # Scale to the required format (assuming 0-1 range)
+    center_x = center_x / float(image_size[1])
+    center_y = center_y / float(image_size[0])
+    size = size / float(max(image_size))
+
+    bbx_xys = torch.stack([center_x, center_y, size], dim=-1)
     return bbx_xys
 
 
@@ -396,3 +453,7 @@ def get_infov_mask(p2d, w_real, h_real):
     else:
         mask = (x >= 0) * (x < w_real[..., None]) * (y >= 0) * (y < h_real[..., None])
     return mask
+
+
+
+

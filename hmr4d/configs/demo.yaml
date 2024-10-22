@@ -23,20 +23,19 @@ video_name: ???
 output_root: outputs/demo
 output_dir: "${output_root}/${video_name}"
 preprocess_dir: ${output_dir}/preprocess
-video_path: "${output_dir}/0_input_video.mp4"
+video_path: ???
 
 # Options
-static_cam: False
-verbose: False
+pose_json: null
+visual_odometry_json: null  # Add this line to include visual odometry in the configuration
 
 paths:
   bbx: ${preprocess_dir}/bbx.pt
   bbx_xyxy_video_overlay: ${preprocess_dir}/bbx_xyxy_video_overlay.mp4
   vit_features: ${preprocess_dir}/vit_features.pt
   vitpose: ${preprocess_dir}/vitpose.pt
-  vitpose_video_overlay: ${preprocess_dir}/vitpose_video_overlay.mp4
   hmr4d_results: ${output_dir}/hmr4d_results.pt
-  incam_video: ${output_dir}/1_incam.mp4
-  global_video: ${output_dir}/2_global.mp4
-  incam_global_horiz_video: ${output_dir}/${video_name}_3_incam_global_horiz.mp4
   slam: ${preprocess_dir}/slam_results.pt
+  keypoints_3d_json: ${output_dir}/${video_name}_keypoints_3d.json
+
+batch_length: 45  # Default batch length in seconds

@@ -21,7 +21,6 @@ from hmr4d.utils.geo.augment_noisy_pose import (
 from hmr4d.utils.geo.hmr_cam import perspective_projection, normalize_kp2d, safely_render_x3d_K, get_bbx_xys
 
 from hmr4d.utils.video_io_utils import save_video
-from hmr4d.utils.vis.cv2_utils import draw_bbx_xys_on_image_batch
 from hmr4d.utils.geo.flip_utils import flip_smplx_params, avg_smplx_aa
 from hmr4d.model.gvhmr.utils.postprocess import pp_static_joint, pp_static_joint_cam, process_ik
 

@@ -9,8 +9,6 @@ from hmr4d.utils.pylogger import Log
 from hmr4d.utils.comm.gather import all_gather
 from hmr4d.utils.eval.eval_utils import compute_camcoord_metrics, as_np_array
 from hmr4d.utils.smplx_utils import make_smplx
-from hmr4d.utils.vis.cv2_utils import cv2, draw_bbx_xys_on_image_batch, draw_coco17_skeleton_batch
-from hmr4d.utils.vis.renderer_utils import simple_render_mesh_background
 from hmr4d.utils.video_io_utils import read_video_np, get_video_lwh, save_video
 from hmr4d.utils.geo_transform import apply_T_on_points
 from hmr4d.utils.seq_utils import rearrange_by_mask
