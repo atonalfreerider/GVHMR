@@ -8,7 +8,6 @@ from time import time
 from hmr4d.configs import MainStore, builds
 from hmr4d.utils.smplx_utils import make_smplx
 from hmr4d.utils.wis3d_utils import make_wis3d, add_motion_as_lines
-from hmr4d.utils.vis.renderer_utils import simple_render_mesh_background
 from hmr4d.utils.video_io_utils import read_video_np, save_video
 
 import hmr4d.utils.matrix as matrix

@@ -14,7 +14,6 @@ from hmr4d.utils.geo_transform import compute_cam_angvel, apply_T_on_points
 from hmr4d.utils.geo.hmr_global import get_tgtcoord_rootparam, get_T_w2c_from_wcparams, get_c_rootparam, get_R_c2gv
 
 from hmr4d.utils.wis3d_utils import make_wis3d, add_motion_as_lines
-from hmr4d.utils.vis.renderer import Renderer
 import imageio
 from hmr4d.utils.video_io_utils import read_video_np
 from hmr4d.utils.net_utils import get_valid_mask, repeat_to_max_len, repeat_to_max_len_dict
