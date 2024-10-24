@@ -23,7 +23,7 @@ video_name: ???
 output_root: outputs/demo
 output_dir: "${output_root}/${video_name}"
 preprocess_dir: ${output_dir}/preprocess
-video_path: "${output_dir}/0_input_video.mp4"
+video_path: ???
 
 # Options
 pose_json: null
@@ -37,3 +37,5 @@ paths:
   hmr4d_results: ${output_dir}/hmr4d_results.pt
   slam: ${preprocess_dir}/slam_results.pt
   keypoints_3d_json: ${output_dir}/${video_name}_keypoints_3d.json
+
+batch_length: 30  # Default batch length in seconds
